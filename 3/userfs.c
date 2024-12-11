@@ -68,6 +68,25 @@ static struct filedesc **file_descriptors = NULL;
 static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
 
+struct block *create_block(struct block *next, struct block *prev) {
+  struct block *block = (struct block *) malloc(sizeof(struct block));
+  if (block == NULL) {
+    return NULL;
+  }
+
+  block->memory = (char *) malloc(BLOCK_SIZE);
+  if (block->memory == NULL) {
+    free(block);
+    return NULL;
+  }
+
+  block->occupied = 0;
+  block->next = next;
+  block->prev = prev;
+
+  return block;
+}
+
 enum ufs_error_code
 ufs_errno()
 {
@@ -206,65 +225,64 @@ ufs_write(int fd, const char *buf, size_t size)
       quotient += 1;
     }
 
+    // TODO: unite the processes of allocating blocks 
+    // and writing data to blocks
+
     // as I found, FAT has 512 bytes per block
     // so, each block contains 512 bytes of memory
     // except fields size
     //
-    // initial block (0)
-    struct block *block = (struct block *) malloc(sizeof(struct block));
-    block->memory = (char *) malloc(BLOCK_SIZE);
-    block->occupied = 0;
-    block->next = NULL;
-    block->prev = NULL;
-    // initial block would be the tail of list
-    target_file->last_block = block;
-
-    struct block *next_block = NULL;
+    // initial block (0) would be tail (it there are multiple blocks)
+    struct block *block = create_block(NULL, NULL);
     for (size_t i = 1; i < quotient; ++i) {
+      if (block != NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return -1;
+      }
       // inserting new block at the head
-      next_block = (struct block *) malloc(sizeof(struct block));
-      next_block->memory = (char *) malloc(BLOCK_SIZE);
-      next_block->occupied = 0;
-      next_block->next = block;
-      next_block->prev = NULL;
-      // chain tail block
+      struct block *next_block = create_block(block, NULL);
+      if (block != NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return -1;
+      }
+      // hook the tail block
       block->prev = next_block;
-      // replace block by next_block
+      // replace `block` by `next_block`
       block = next_block;
     }
-    // now, block and next_block store
-    // pointer to first block
-    // NOTE: in case of multiple blocks
-    //
-    // if it is only one block then
-    // only variable `block` would be valid
+    // `block` store the pointer to first block
     target_file->block_list = block;
-    target_file->last_block = block;
+    FD->current_block = block;
 
-    // fill blocks with data
     size_t written = 0;
     size_t copy_size = 0;
-    FD->current_block = block;
     while (written < size) {
       copy_size = BLOCK_SIZE - block->occupied;
       if (copy_size > size) {
         copy_size = size;
       }
+      // copy data and update all state variables
       memcpy(block->memory, buf, copy_size);
       written += copy_size;
       block->occupied += copy_size;
       FD->file_offset += copy_size;
-
       // if block is full, choose next block
       if (block->occupied == BLOCK_SIZE) {
         block = block->next;
         FD->current_block = block;
       }
     }
+    // update recent block
+    target_file->last_block = block;
 
-    // TODO: implement for not empty files
 
     return written;
+  }
+
+  // TODO: implement for not empty files
+  //
+  // otherwise, block_list is not NULL
+  if (target_file->last_block == NULL) {
   }
 
   return -1;
@@ -308,12 +326,13 @@ ufs_read(int fd, char *buf, size_t size)
     if (copy_size > block->occupied) {
       copy_size = block->occupied;
     }
+
     memcpy(buf, block->memory, copy_size);
     read += copy_size;
-    size -= read;
+    size -= copy_size;
     FD->file_offset += copy_size;
 
-    // if block is full, choose next block
+    // if block is completely read, choose next block
     if (FD->file_offset % BLOCK_SIZE == 0) {
       block = block->next;
       FD->current_block = block;
