@@ -50,10 +50,10 @@ static struct file *file_list = NULL;
 struct filedesc {
   struct file *file;
 
+  /* Additional fields */
+
   /** Current block being read/written. */
   struct block *current_block;
-  /** Current position within the current block. */
-  size_t block_offset;
   /** Total offset in the file. */
   size_t file_offset;
 };
@@ -85,22 +85,22 @@ ufs_open(const char *filename, int flags)
     return -1;
   }
 
-  struct file *existing_file = file_list;
-  while (existing_file != NULL) {
-    if (strcmp(existing_file->name, filename) == 0) {
+  struct file *target_file = file_list;
+  while (target_file != NULL) {
+    if (strcmp(target_file->name, filename) == 0) {
       // strings are equal
       break;
     }
-    existing_file = existing_file->next;
+    target_file = target_file->next;
   }
 
   // if flags are not set
-  if (existing_file == NULL && !(UFS_CREATE & flags)) {
+  if (target_file == NULL && !(UFS_CREATE & flags)) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
 
-  if (existing_file == NULL && (UFS_CREATE & flags)) {
+  if (target_file == NULL && (UFS_CREATE & flags)) {
     struct file *new_file = (struct file *) malloc(sizeof(struct file));
     if (new_file == NULL) {
       ufs_error_code = UFS_ERR_NO_MEM;
@@ -112,7 +112,6 @@ ufs_open(const char *filename, int flags)
     new_file->last_block = NULL;
     new_file->refs = 0;
     new_file->name = strdup(filename);
-
     // if filename allocation has failed
     if (new_file->name == NULL) {
       free(new_file);
@@ -126,10 +125,14 @@ ufs_open(const char *filename, int flags)
     if (file_list != NULL) {
       file_list->prev = new_file;
     }
-    // now, new_file - head of file_list
+    // adding new_file to list, it becomes the head of file_list
     file_list = new_file;
+    // now, new_file exists => target_file should be valid
+    target_file = new_file;
   }
 
+  // check if there is a free memory for new fd
+  // if no, then reallocate others, changing the capacity of fd array
   if (file_descriptor_count == file_descriptor_capacity) {
     int new_fd_cap = 0;
     if (file_descriptor_count == 0) {
@@ -141,24 +144,30 @@ ufs_open(const char *filename, int flags)
     struct filedesc **new_file_descriptors =
       (struct filedesc **) realloc(
           file_descriptors, new_fd_cap * (sizeof(struct filedesc *)));
+    if (new_file_descriptors == NULL) {
+        // realloc fails, returned pointer is null
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return -1;
+    }
 
     file_descriptor_capacity = new_fd_cap;
     file_descriptors = new_file_descriptors;
   }
 
-  struct filedesc *new_fd = (struct filedesc *) malloc(sizeof(struct filedesc));
+  struct filedesc *new_fd =
+      (struct filedesc *) malloc(sizeof(struct filedesc));
   if (new_fd == NULL) {
     ufs_error_code = UFS_ERR_NO_MEM;
     return -1;
   }
 
   // init new_fd
-  new_fd->block_offset = 0;
-  new_fd->current_block = 0;
-  new_fd->file_offset = 0;
+  // in case of a new file: target_file also points to new_file
+  new_fd->file = target_file;
+  ++target_file->refs;
 
-  new_fd->file = file_list;
-  ++file_list->refs;
+  new_fd->current_block = target_file->block_list;
+  new_fd->file_offset = 0;
 
   file_descriptors[file_descriptor_count] = new_fd;
   ++file_descriptor_count;
@@ -176,12 +185,13 @@ ufs_write(int fd, const char *buf, size_t size)
     return -1;
   }
 
-  if (file_descriptors[fd] == NULL) {
+  struct filedesc *FD = file_descriptors[fd];
+  if (FD == NULL) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
 
-  struct file *target_file = file_descriptors[fd]->file;
+  struct file *target_file = FD->file;
   // perhaps an unnecessary check
   // but should false always (make sure, I made it correctly)
   if (target_file == NULL) {
@@ -196,7 +206,7 @@ ufs_write(int fd, const char *buf, size_t size)
       quotient += 1;
     }
 
-    // as I found that FAT has 512 bytes per block
+    // as I found, FAT has 512 bytes per block
     // so, each block contains 512 bytes of memory
     // except fields size
     //
@@ -229,25 +239,27 @@ ufs_write(int fd, const char *buf, size_t size)
     // if it is only one block then
     // only variable `block` would be valid
     target_file->block_list = block;
+    target_file->last_block = block;
 
     // fill blocks with data
     size_t written = 0;
     size_t copy_size = 0;
+    FD->current_block = block;
     while (written < size) {
       copy_size = BLOCK_SIZE - block->occupied;
       if (copy_size > size) {
         copy_size = size;
       }
       memcpy(block->memory, buf, copy_size);
-      block->occupied += copy_size;
       written += copy_size;
+      block->occupied += copy_size;
+      FD->file_offset += copy_size;
 
       // if block is full, choose next block
       if (block->occupied == BLOCK_SIZE) {
         block = block->next;
+        FD->current_block = block;
       }
-
-      // TODO: add offset to fd
     }
 
     // TODO: implement for not empty files
@@ -274,7 +286,7 @@ ufs_read(int fd, char *buf, size_t size)
     return -1;
   }
 
-  struct file *target_file = FD ->file;
+  struct file *target_file = FD->file;
   if (target_file == NULL) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
@@ -289,20 +301,21 @@ ufs_read(int fd, char *buf, size_t size)
   size_t copy_size = 0;
   struct block *block = target_file->block_list;
   FD->current_block = block;
-  while (block != NULL && FD->block_offset != block->occupied) {
+  // check while next block is not that goes after last block
+  // and while block offset != length of block data
+  while (block != NULL && (FD->file_offset % BLOCK_SIZE) != block->occupied) {
     copy_size = size;
     if (copy_size > block->occupied) {
       copy_size = block->occupied;
     }
     memcpy(buf, block->memory, copy_size);
-    FD->block_offset += copy_size;
     read += copy_size;
     size -= read;
+    FD->file_offset += copy_size;
 
     // if block is full, choose next block
-    if (FD->block_offset == BLOCK_SIZE) {
+    if (FD->file_offset % BLOCK_SIZE == 0) {
       block = block->next;
-      FD->block_offset += 1;
       FD->current_block = block;
     }
   }
