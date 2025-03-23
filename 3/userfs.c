@@ -77,13 +77,11 @@ struct block *
 create_block(struct block *prev, struct block *next) {
   struct block *block = (struct block *) malloc(sizeof(struct block));
   if (block == NULL) {
-    printf("no mem for block struct\n");
     return NULL;
   }
 
   block->memory = (char *) malloc(BLOCK_SIZE);
   if (block->memory == NULL) {
-    printf("no mem for block memory field\n");
     free(block);
     return NULL;
   }
@@ -275,25 +273,12 @@ ufs_write(int fd, const char *buf, size_t size)
      * case: block_list != NULL
      */
 
-    printf("\n");
-
     size_t buf_pos = 0;
     size_t remaining = size;
     size_t block_offset = FD->file_pos % BLOCK_SIZE;
     struct block *block = FD->current_block;
 
-    printf("ufs_write: file offset: %zu\n", target_file->file_offset);
-    printf("ufs_write: block addr: %p\n", (void *)block);
-    printf("ufs_write: block offset: %zu\n", block_offset);
-    printf("ufs_write: block occupied: %zu\n", block->occupied);
-    printf("ufs_write: block memory: %s\n", block->memory);
-    printf("ufs_write: written: %zu size: %zu\n", written, size);
-    printf("ufs_write: buf pos: %zu\n", buf_pos);
-    printf("ufs_write: buffer: %s\n", buf);
-    printf("ufs_write: start loop\n");
-
     while (written < size) {
-      printf("cycle: written: %zu, size: %zu\n", written, size);
       size_t copy_size = (BLOCK_SIZE - block_offset > remaining) ?
         remaining : BLOCK_SIZE - block_offset;
 
@@ -314,7 +299,6 @@ ufs_write(int fd, const char *buf, size_t size)
       if (block_offset == BLOCK_SIZE) {
         struct block *next_block = block->next;
         if (next_block == NULL) {
-          printf("ufs_write: creating new block\n");
           next_block = create_block(block, NULL);
           if (next_block == NULL) {
             ufs_error_code = UFS_ERR_NO_MEM;
@@ -330,7 +314,6 @@ ufs_write(int fd, const char *buf, size_t size)
     }
   }
 
-  printf("ufs_write: written value: %zu\n", written);
   return written;
 }
 
@@ -346,7 +329,6 @@ ufs_read(int fd, char *buf, size_t size)
 
   struct filedesc *FD = file_descriptors[fd];
   if (FD == NULL) {
-    printf("ufs_read: fd is NULL\n");
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
@@ -364,7 +346,6 @@ ufs_read(int fd, char *buf, size_t size)
 
   struct block *block = FD->current_block;
   if (block == NULL) {
-    printf("ufs_read: block is null\n");
     block = target_file->block_list;
   }
 
@@ -375,21 +356,11 @@ ufs_read(int fd, char *buf, size_t size)
   if (remaining > size) {
     remaining = size;
   }
-  printf("ufs_read: file_offset: %zu\n", target_file->file_offset);
-  printf("ufs_read: block_offset: %zu\n", block_offset);
-  printf("ufs_read: block occupied: %zu\n", block->occupied);
-  printf("ufs_read: read: %zu size: %zu\n", read, size);
-  printf("ufs_read: buf_pos: %zu\n", buf_pos);
-  printf("ufs_read: remaining: %zu\n", remaining);
-  printf("ufs_read: buffer: %s\n", block->memory);
 
-  printf("start loop\n");
   while (remaining > 0 && block != NULL) {
     size_t can_read_from_block = block->occupied - block_offset;
     size_t copy_size = (remaining < can_read_from_block) ?
       remaining : can_read_from_block;
-
-    printf("ufs_read: copy_size: %zu\n", copy_size);
 
     memcpy(buf + buf_pos, block->memory + block_offset, copy_size);
     read += copy_size;
@@ -397,7 +368,6 @@ ufs_read(int fd, char *buf, size_t size)
     block_offset += copy_size;
     remaining -= copy_size;
     FD->file_pos += copy_size;
-    printf("ufs_read: read: %zu, size: %zu\n", read, size);
 
     // if block is completely read, choose next block
     if (remaining > 0) {
@@ -411,7 +381,6 @@ ufs_read(int fd, char *buf, size_t size)
     }
   }
 
-  printf("ufs_read: read value: %zu\n", read);
   return read;
 }
 
