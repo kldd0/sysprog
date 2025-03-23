@@ -3,45 +3,49 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 enum {
-	BLOCK_SIZE = 512,
-	MAX_FILE_SIZE = 1024 * 1024 * 100,
+  BLOCK_SIZE = 512,
+  MAX_FILE_SIZE = 1024 * 1024 * 100,
 };
 
 /** Global error code. Set from any function on any error. */
 static enum ufs_error_code ufs_error_code = UFS_ERR_NO_ERR;
 
 struct block {
-	/** Block memory. */
-	char *memory;
-	/** How many bytes are occupied. */
-	size_t occupied;
-	/** Next block in the file. */
-	struct block *next;
-	/** Previous block in the file. */
-	struct block *prev;
+  /** Block memory. */
+  char *memory;
+  /** How many bytes are occupied. */
+  size_t occupied;
+  /** Next block in the file. */
+  struct block *next;
+  /** Previous block in the file. */
+  struct block *prev;
 
-	/* PUT HERE OTHER MEMBERS */
+  /* PUT HERE OTHER MEMBERS */
 };
 
 struct file {
-	/** Double-linked list of file blocks. */
-	struct block *block_list;
-	/**
-	 * Last block in the list above for fast access to the end
-	 * of file.
-	 */
-	struct block *last_block;
-	/** How many file descriptors are opened on the file. */
-	int refs;
-	/** File name. */
-	char *name;
-	/** Files are stored in a double-linked list. */
-	struct file *next;
-	struct file *prev;
+  /** Double-linked list of file blocks. */
+  struct block *block_list;
+  /**
+   * Last block in the list above for fast access to the end
+   * of file.
+   */
+  struct block *last_block;
+  /** How many file descriptors are opened on the file. */
+  int refs;
+  /** File name. */
+  char *name;
+  /** Files are stored in a double-linked list. */
+  struct file *next;
+  struct file *prev;
 
-	/* PUT HERE OTHER MEMBERS */
+  /* PUT HERE OTHER MEMBERS */
+
+  /** Total offset in the file. */
+  size_t file_offset;
 };
 
 /** List of all files. */
@@ -54,8 +58,9 @@ struct filedesc {
 
   /** Current block being read/written. */
   struct block *current_block;
-  /** Total offset in the file. */
-  size_t file_offset;
+
+  /** Current file offset */
+  size_t file_pos;
 };
 
 /**
@@ -68,14 +73,17 @@ static struct filedesc **file_descriptors = NULL;
 static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
 
-struct block *create_block(struct block *next, struct block *prev) {
+struct block *
+create_block(struct block *prev, struct block *next) {
   struct block *block = (struct block *) malloc(sizeof(struct block));
   if (block == NULL) {
+    printf("no mem for block struct\n");
     return NULL;
   }
 
   block->memory = (char *) malloc(BLOCK_SIZE);
   if (block->memory == NULL) {
+    printf("no mem for block memory field\n");
     free(block);
     return NULL;
   }
@@ -90,7 +98,7 @@ struct block *create_block(struct block *next, struct block *prev) {
 enum ufs_error_code
 ufs_errno()
 {
-	return ufs_error_code;
+  return ufs_error_code;
 }
 
 int
@@ -112,7 +120,6 @@ ufs_open(const char *filename, int flags)
     }
     target_file = target_file->next;
   }
-
   // if flags are not set
   if (target_file == NULL && !(UFS_CREATE & flags)) {
     ufs_error_code = UFS_ERR_NO_FILE;
@@ -125,11 +132,11 @@ ufs_open(const char *filename, int flags)
       ufs_error_code = UFS_ERR_NO_MEM;
       return -1;
     }
-
     // init new file
     new_file->block_list = NULL;
     new_file->last_block = NULL;
     new_file->refs = 0;
+    new_file->file_offset = 0;
     new_file->name = strdup(filename);
     // if filename allocation has failed
     if (new_file->name == NULL) {
@@ -137,7 +144,6 @@ ufs_open(const char *filename, int flags)
       ufs_error_code = UFS_ERR_NO_MEM;
       return -1;
     }
-
     // insert new_file at the head of linked list
     new_file->next = file_list;
     new_file->prev = NULL;
@@ -164,9 +170,9 @@ ufs_open(const char *filename, int flags)
       (struct filedesc **) realloc(
           file_descriptors, new_fd_cap * (sizeof(struct filedesc *)));
     if (new_file_descriptors == NULL) {
-        // realloc fails, returned pointer is null
-        ufs_error_code = UFS_ERR_NO_MEM;
-        return -1;
+      // realloc() fails, returned pointer is null
+      ufs_error_code = UFS_ERR_NO_MEM;
+      return -1;
     }
 
     file_descriptor_capacity = new_fd_cap;
@@ -174,7 +180,7 @@ ufs_open(const char *filename, int flags)
   }
 
   struct filedesc *new_fd =
-      (struct filedesc *) malloc(sizeof(struct filedesc));
+    (struct filedesc *) malloc(sizeof(struct filedesc));
   if (new_fd == NULL) {
     ufs_error_code = UFS_ERR_NO_MEM;
     return -1;
@@ -185,8 +191,8 @@ ufs_open(const char *filename, int flags)
   new_fd->file = target_file;
   ++target_file->refs;
 
+  new_fd->file_pos = 0;
   new_fd->current_block = target_file->block_list;
-  new_fd->file_offset = 0;
 
   file_descriptors[file_descriptor_count] = new_fd;
   ++file_descriptor_count;
@@ -211,81 +217,121 @@ ufs_write(int fd, const char *buf, size_t size)
   }
 
   struct file *target_file = FD->file;
-  // perhaps an unnecessary check
-  // but should false always (make sure, I made it correctly)
   if (target_file == NULL) {
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
 
+  size_t written = 0;
+
   if (target_file->block_list == NULL) {
-    size_t quotient = size / BLOCK_SIZE;
-    size_t remainder = size % BLOCK_SIZE;
-    if (remainder > 0) {
-      quotient += 1;
-    }
-
-    // TODO: unite the processes of allocating blocks 
-    // and writing data to blocks
-
-    // as I found, FAT has 512 bytes per block
-    // so, each block contains 512 bytes of memory
+    // FAT has 512 bytes per block
+    // that means each block contains 512 bytes of memory
     // except fields size
     //
-    // initial block (0) would be tail (it there are multiple blocks)
+    // initial block (0) - the head of block list
     struct block *block = create_block(NULL, NULL);
-    for (size_t i = 1; i < quotient; ++i) {
-      if (block != NULL) {
-        ufs_error_code = UFS_ERR_NO_MEM;
-        return -1;
-      }
-      // inserting new block at the head
-      struct block *next_block = create_block(block, NULL);
-      if (block != NULL) {
-        ufs_error_code = UFS_ERR_NO_MEM;
-        return -1;
-      }
-      // hook the tail block
-      block->prev = next_block;
-      // replace `block` by `next_block`
-      block = next_block;
+    if (block == NULL) {
+      ufs_error_code = UFS_ERR_NO_MEM;
+      return -1;
     }
-    // `block` store the pointer to first block
-    target_file->block_list = block;
     FD->current_block = block;
-
-    size_t written = 0;
-    size_t copy_size = 0;
-    while (written < size) {
-      copy_size = BLOCK_SIZE - block->occupied;
-      if (copy_size > size) {
-        copy_size = size;
-      }
-      // copy data and update all state variables
-      memcpy(block->memory, buf, copy_size);
-      written += copy_size;
-      block->occupied += copy_size;
-      FD->file_offset += copy_size;
-      // if block is full, choose next block
-      if (block->occupied == BLOCK_SIZE) {
-        block = block->next;
-        FD->current_block = block;
-      }
-    }
-    // update recent block
+    target_file->block_list = block;
     target_file->last_block = block;
 
+    size_t buf_pos = 0;
+    size_t remaining = size;
 
-    return written;
+    while (written < size) {
+      size_t copy_size = (BLOCK_SIZE > remaining) ?
+        remaining : BLOCK_SIZE;
+
+      memcpy(block->memory, buf + buf_pos, copy_size);
+      remaining -= copy_size;
+      written += copy_size;
+      buf_pos += copy_size;
+      block->occupied += copy_size;
+
+      FD->file_pos += copy_size;
+      if (FD->file_pos > target_file->file_offset) {
+        target_file->file_offset = FD->file_pos;
+      }
+
+      // if block is full, choose next block
+      if (block->occupied == BLOCK_SIZE) {
+        struct block *next_block = create_block(block, NULL);
+        if (next_block == NULL) {
+          ufs_error_code = UFS_ERR_NO_MEM;
+          return -1;
+        }
+
+        block = next_block;
+        FD->current_block = block;
+        target_file->last_block = block;
+      }
+    }
+  } else {
+    /**
+     * case: block_list != NULL
+     */
+
+    printf("\n");
+
+    size_t buf_pos = 0;
+    size_t remaining = size;
+    size_t block_offset = FD->file_pos % BLOCK_SIZE;
+    struct block *block = FD->current_block;
+
+    printf("ufs_write: file offset: %zu\n", target_file->file_offset);
+    printf("ufs_write: block addr: %p\n", (void *)block);
+    printf("ufs_write: block offset: %zu\n", block_offset);
+    printf("ufs_write: block occupied: %zu\n", block->occupied);
+    printf("ufs_write: block memory: %s\n", block->memory);
+    printf("ufs_write: written: %zu size: %zu\n", written, size);
+    printf("ufs_write: buf pos: %zu\n", buf_pos);
+    printf("ufs_write: buffer: %s\n", buf);
+    printf("ufs_write: start loop\n");
+
+    while (written < size) {
+      printf("cycle: written: %zu, size: %zu\n", written, size);
+      size_t copy_size = (BLOCK_SIZE - block_offset > remaining) ?
+        remaining : BLOCK_SIZE - block_offset;
+
+      memcpy(block->memory + block_offset, buf + buf_pos, copy_size);
+      remaining -= copy_size;
+      written += copy_size;
+      buf_pos += copy_size;
+      block_offset += copy_size;
+      block->occupied = (block->occupied < block_offset) ?
+        block_offset : block->occupied;
+
+      FD->file_pos += copy_size;
+      if (FD->file_pos > target_file->file_offset) {
+        target_file->file_offset = FD->file_pos;
+      }
+
+      // if block is full, choose next block
+      if (block_offset == BLOCK_SIZE) {
+        struct block *next_block = block->next;
+        if (next_block == NULL) {
+          printf("ufs_write: creating new block\n");
+          next_block = create_block(block, NULL);
+          if (next_block == NULL) {
+            ufs_error_code = UFS_ERR_NO_MEM;
+            return -1;
+          }
+        }
+        // update current state
+        block = next_block;
+        block_offset = 0;
+        FD->current_block = block;
+        target_file->last_block = block;
+      }
+    }
   }
 
-  // TODO: implement for not empty files
-  //
-  // otherwise, block_list is not NULL
-  if (target_file->last_block == NULL) {
-  }
-
-  return -1;
+  printf("ufs_write: written value: %zu\n", written);
+  return written;
 }
 
 ssize_t
@@ -300,6 +346,7 @@ ufs_read(int fd, char *buf, size_t size)
 
   struct filedesc *FD = file_descriptors[fd];
   if (FD == NULL) {
+    printf("ufs_read: fd is NULL\n");
     ufs_error_code = UFS_ERR_NO_FILE;
     return -1;
   }
@@ -315,30 +362,56 @@ ufs_read(int fd, char *buf, size_t size)
     return -1;
   }
 
-  size_t read = 0;
-  size_t copy_size = 0;
-  struct block *block = target_file->block_list;
-  FD->current_block = block;
-  // check while next block is not that goes after last block
-  // and while block offset != length of block data
-  while (block != NULL && (FD->file_offset % BLOCK_SIZE) != block->occupied) {
-    copy_size = size;
-    if (copy_size > block->occupied) {
-      copy_size = block->occupied;
-    }
+  struct block *block = FD->current_block;
+  if (block == NULL) {
+    printf("ufs_read: block is null\n");
+    block = target_file->block_list;
+  }
 
-    memcpy(buf, block->memory, copy_size);
+  size_t read = 0;
+  size_t buf_pos = 0;
+  size_t block_offset = FD->file_pos % BLOCK_SIZE;
+  size_t remaining = target_file->file_offset - FD->file_pos;
+  if (remaining > size) {
+    remaining = size;
+  }
+  printf("ufs_read: file_offset: %zu\n", target_file->file_offset);
+  printf("ufs_read: block_offset: %zu\n", block_offset);
+  printf("ufs_read: block occupied: %zu\n", block->occupied);
+  printf("ufs_read: read: %zu size: %zu\n", read, size);
+  printf("ufs_read: buf_pos: %zu\n", buf_pos);
+  printf("ufs_read: remaining: %zu\n", remaining);
+  printf("ufs_read: buffer: %s\n", block->memory);
+
+  printf("start loop\n");
+  while (remaining > 0 && block != NULL) {
+    size_t can_read_from_block = block->occupied - block_offset;
+    size_t copy_size = (remaining < can_read_from_block) ?
+      remaining : can_read_from_block;
+
+    printf("ufs_read: copy_size: %zu\n", copy_size);
+
+    memcpy(buf + buf_pos, block->memory + block_offset, copy_size);
     read += copy_size;
-    size -= copy_size;
-    FD->file_offset += copy_size;
+    buf_pos += copy_size;
+    block_offset += copy_size;
+    remaining -= copy_size;
+    FD->file_pos += copy_size;
+    printf("ufs_read: read: %zu, size: %zu\n", read, size);
 
     // if block is completely read, choose next block
-    if (FD->file_offset % BLOCK_SIZE == 0) {
+    if (remaining > 0) {
       block = block->next;
       FD->current_block = block;
+      block_offset = 0;
+
+      if (block == NULL) {
+        break;
+      }
     }
   }
 
+  printf("ufs_read: read value: %zu\n", read);
   return read;
 }
 
@@ -360,6 +433,7 @@ ufs_close(int fd)
   // decrement file ref count of fd
   --file_descriptors[fd]->file->refs;
   file_descriptors[fd]->file = NULL;
+  file_descriptors[fd]->current_block = NULL;
 
   free(file_descriptors[fd]);
   file_descriptors[fd] = NULL;
@@ -437,11 +511,11 @@ ufs_delete(const char *filename)
 int
 ufs_resize(int fd, size_t new_size)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)fd;
-	(void)new_size;
-	ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-	return -1;
+  /* IMPLEMENT THIS FUNCTION */
+  (void)fd;
+  (void)new_size;
+  ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
+  return -1;
 }
 
 #endif

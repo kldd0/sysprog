@@ -2,13 +2,14 @@
 #include "unit.h"
 #include <assert.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 static void
 test_open(void)
 {
 	unit_test_start();
-	
+
 	int fd = ufs_open("file", 0);
 	unit_check(fd == -1, "error when no such file");
 	unit_check(ufs_errno() == UFS_ERR_NO_FILE, "errno is 'no_file'");
