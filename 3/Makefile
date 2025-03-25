@@ -3,7 +3,7 @@ GCC_DEBUG_FLAGS = -ggdb
 
 all: test
 
-test:
+test: userfs.c test.c
 	gcc $(GCC_FLAGS) userfs.c test.c ../utils/unit.c -I ../utils -o test
 
 debug:
