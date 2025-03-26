@@ -73,6 +73,33 @@ static struct filedesc **file_descriptors = NULL;
 static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
 
+struct file *
+create_file(struct file *prev, struct file *next, const char *filename) {
+    struct file *file = (struct file *) malloc(sizeof(struct file));
+    if (file == NULL) {
+        return NULL;
+    }
+
+    file->block_list = NULL;
+    file->last_block = NULL;
+    file->next = next;
+    file->prev = prev;
+    file->refs = 0;
+    file->file_offset = 0;
+
+    file->name = strdup(filename);
+    if (file->name == NULL) {
+        free(file);
+        return NULL;
+    }
+
+    if (next != NULL) {
+        next->prev = file;
+    }
+
+    return file;
+}
+
 struct block *
 create_block(struct block *prev, struct block *next) {
     struct block *block = (struct block *) malloc(sizeof(struct block));
@@ -130,50 +157,32 @@ ufs_open(const char *filename, int flags)
     }
 
     if (target_file == NULL && (UFS_CREATE & flags)) {
-        struct file *new_file = (struct file *) malloc(sizeof(struct file));
-        if (new_file == NULL) {
+        // Inserting a new file to the top of the file list
+        // by specifying file_list as the next file node
+        struct file *file = create_file(NULL, file_list, filename);
+        if (file == NULL) {
             ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
         }
-        // Init new file
-        new_file->block_list = NULL;
-        new_file->last_block = NULL;
-        new_file->refs = 0;
-        new_file->file_offset = 0;
-        new_file->name = strdup(filename);
-        // If filename allocation has failed
-        if (new_file->name == NULL) {
-            free(new_file);
-            ufs_error_code = UFS_ERR_NO_MEM;
-            return -1;
-        }
-        // Insert new_file at the head of linked list
-        new_file->next = file_list;
-        new_file->prev = NULL;
+
         if (file_list != NULL) {
-            file_list->prev = new_file;
+            file_list->prev = file;
         }
-        // Adding new_file to list, it becomes the head of file_list
-        file_list = new_file;
-        // Now, new_file exists => target_file should be valid
-        target_file = new_file;
+
+        file_list = file;
+        target_file = file;
     }
 
     // Check if there is a free memory for new fd
     // if no, then reallocate others, changing the capacity of fd array
     if (file_descriptor_count == file_descriptor_capacity) {
-        int new_fd_cap = 0;
-        if (file_descriptor_count == 0) {
-            new_fd_cap = 2;
-        } else {
-            new_fd_cap = file_descriptor_capacity * 2;
-        }
+        int new_fd_cap = (file_descriptor_count == 0) ?
+            new_fd_cap = 2 : file_descriptor_capacity * 2;
 
         struct filedesc **new_file_descriptors =
             (struct filedesc **) realloc(
                     file_descriptors, new_fd_cap * (sizeof(struct filedesc *)));
         if (new_file_descriptors == NULL) {
-            // realloc() fails, returned pointer is null
             ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
         }
@@ -189,7 +198,6 @@ ufs_open(const char *filename, int flags)
         return -1;
     }
 
-    // Init new_fd
     // In case of a new file, target_file also points to new_file
     new_fd->file = target_file;
     ++target_file->refs;
@@ -208,7 +216,7 @@ ufs_write(int fd, const char *buf, size_t size)
 {
     ufs_error_code = UFS_ERR_NO_ERR;
 
-    if (fd < 0 || fd >= file_descriptor_count) {
+    if (fd < 0 || fd >= file_descriptor_capacity) {
         ufs_error_code = UFS_ERR_NO_FILE;
         return -1;
     }
@@ -253,6 +261,11 @@ ufs_write(int fd, const char *buf, size_t size)
         size_t copy_size = (BLOCK_SIZE - block_offset > remaining) ?
             remaining : BLOCK_SIZE - block_offset;
 
+        if (FD->file_pos == MAX_FILE_SIZE && remaining > 0) {
+            ufs_error_code = UFS_ERR_NO_MEM;
+            return -1;
+        }
+
         memcpy(block->memory + block_offset, buf + buf_pos, copy_size);
         remaining -= copy_size;
         written += copy_size;
@@ -293,7 +306,7 @@ ufs_read(int fd, char *buf, size_t size)
 {
     ufs_error_code = UFS_ERR_NO_ERR;
 
-    if (fd < 0 || fd >= file_descriptor_count) {
+    if (fd < 0 || fd >= file_descriptor_capacity) {
         ufs_error_code = UFS_ERR_NO_FILE;
         return -1;
     }
@@ -311,13 +324,13 @@ ufs_read(int fd, char *buf, size_t size)
     }
 
     if (target_file->block_list == NULL) {
-        ufs_error_code = UFS_ERR_NO_MEM;
-        return -1;
+        return 0;
     }
 
     struct block *block = FD->current_block;
     if (block == NULL) {
-        block = target_file->block_list;
+        FD->current_block = target_file->block_list;
+        block = FD->current_block;
     }
 
     size_t read = 0;
@@ -360,7 +373,7 @@ ufs_close(int fd)
 {
     ufs_error_code = UFS_ERR_NO_ERR;
 
-    if (fd < 0 || fd >= file_descriptor_count) {
+    if (fd < 0 || fd >= file_descriptor_capacity) {
         ufs_error_code = UFS_ERR_NO_FILE;
         return -1;
     }
@@ -405,38 +418,40 @@ ufs_delete(const char *filename)
         return -1;
     }
 
-    // Remove target file from linked list
-    if (target_file->next == NULL) {
-        // Target file is the tail of the list
-        struct file *prev_file = target_file->prev;
-        if (prev_file != NULL) {
-            prev_file->next = NULL;
-        } else {
-            // file_list is empty now
-            file_list = NULL;
-        }
-    } else if (target_file->prev == NULL) {
-        // Target file is the head of the list
-        struct file *next_file = target_file->next;
-        if (next_file != NULL) {
-            next_file->prev = NULL;
-        }
-        file_list = next_file;
-    } else {
-        // Target file is in the middle of list
-        struct file *prev_file = target_file->prev;
-        struct file *next_file = target_file->next;
-        prev_file->next = next_file;
-        next_file->prev = prev_file;
+    // Cycle above guarantee that file_list is not NULL
+    struct file *prev = target_file->prev;
+    struct file *next = target_file->next;
+
+    if (prev != NULL) {
+        prev->next = next;
+    }
+
+    if (next != NULL) {
+        next->prev = prev;
+    }
+
+    if (file_list == target_file) {
+        file_list = next;
     }
 
     target_file->prev = NULL;
     target_file->next = NULL;
 
     if (target_file->refs == 0) {
-        // TODO: clear all data in blocks
-        //
         free(target_file->name);
+
+        struct block *block = target_file->block_list;
+        while (block != NULL) {
+            struct block *next_block = block->next;
+
+            free(block->memory);
+            free(block);
+
+            block = next_block;
+        }
+
+        target_file->last_block = NULL;
+        target_file->block_list = NULL;
         free(target_file);
     }
 
