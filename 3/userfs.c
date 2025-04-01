@@ -61,6 +61,9 @@ struct filedesc {
 
     /** Current file offset */
     size_t file_pos;
+
+    /** Flags */
+    unsigned int flags;
 };
 
 /**
@@ -204,6 +207,7 @@ ufs_open(const char *filename, int flags)
 
     new_fd->file_pos = 0;
     new_fd->current_block = target_file->block_list;
+    new_fd->flags = flags;
 
     file_descriptors[file_descriptor_count] = new_fd;
     ++file_descriptor_count;
@@ -224,6 +228,11 @@ ufs_write(int fd, const char *buf, size_t size)
     struct filedesc *FD = file_descriptors[fd];
     if (FD == NULL) {
         ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    if (FD->flags & UFS_READ_ONLY) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
         return -1;
     }
 
@@ -314,6 +323,11 @@ ufs_read(int fd, char *buf, size_t size)
     struct filedesc *FD = file_descriptors[fd];
     if (FD == NULL) {
         ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    if (FD->flags & UFS_WRITE_ONLY) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
         return -1;
     }
 
