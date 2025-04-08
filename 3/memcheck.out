@@ -1,0 +1,47 @@
+-- 512 bytes test start --
+open 1000 read and write descriptors, fill with data
+read the data back
+
+#### Leak 1 (42 bytes) ####
+0 - (null)
+1 - malloc
+2 - _Znwm
+3 - _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_mutateEmmPKcm
+4 - _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_replaceEmmPKcm
+5 - (null)
+6 - (null)
+7 - _init
+8 - (null)
+9 - (null)
+10 - (null)
+#### Leak 2 (72704 bytes) ####
+0 - (null)
+1 - malloc
+2 - (null)
+3 - (null)
+4 - (null)
+5 - (null)
+#### Leak 3 (40 bytes) ####
+0 - (null)
+1 - malloc
+2 - XInitThreads
+3 - (null)
+4 - (null)
+5 - (null)
+#### Leak 4 (40 bytes) ####
+0 - (null)
+1 - malloc
+2 - XInitThreads
+3 - (null)
+4 - (null)
+5 - (null)
+#### Leak 5 (40 bytes) ####
+0 - (null)
+1 - malloc
+2 - XInitThreads
+3 - (null)
+4 - (null)
+5 - (null)
+HH: found 5 leaks (72866 bytes)
+HH: suppressed 1 internal leaks
+HH: total allocation count - 6027

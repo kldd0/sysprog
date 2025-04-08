@@ -100,6 +100,10 @@ create_file(struct file *prev, struct file *next, const char *filename) {
         next->prev = file;
     }
 
+    if (prev != NULL) {
+        prev->next = file;
+    }
+
     return file;
 }
 
@@ -168,10 +172,6 @@ ufs_open(const char *filename, int flags)
             return -1;
         }
 
-        if (file_list != NULL) {
-            file_list->prev = file;
-        }
-
         file_list = file;
         target_file = file;
     }
@@ -180,11 +180,11 @@ ufs_open(const char *filename, int flags)
     // if no, then reallocate others, changing the capacity of fd array
     if (file_descriptor_count == file_descriptor_capacity) {
         int new_fd_cap = (file_descriptor_count == 0) ?
-            new_fd_cap = 2 : file_descriptor_capacity * 2;
+            2 : file_descriptor_capacity * 2;
 
         struct filedesc **new_file_descriptors =
             (struct filedesc **) realloc(
-                    file_descriptors, new_fd_cap * (sizeof(struct filedesc *)));
+                    file_descriptors, new_fd_cap * sizeof(struct filedesc *));
         if (new_file_descriptors == NULL) {
             ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
@@ -206,8 +206,8 @@ ufs_open(const char *filename, int flags)
     ++target_file->refs;
 
     new_fd->file_pos = 0;
-    new_fd->current_block = target_file->block_list;
     new_fd->flags = flags;
+    new_fd->current_block = target_file->block_list;
 
     file_descriptors[file_descriptor_count] = new_fd;
     ++file_descriptor_count;
@@ -247,11 +247,11 @@ ufs_write(int fd, const char *buf, size_t size)
     // it means that each block contains
     // 512 bytes of memory except other fields size
 
+    struct block *block = FD->current_block;
     size_t written = 0;
     size_t buf_pos = 0;
     size_t remaining = size;
     size_t block_offset = FD->file_pos % BLOCK_SIZE;
-    struct block *block = FD->current_block;
 
     if (block == NULL) {
         // Case when file is newly created:
@@ -261,16 +261,38 @@ ufs_write(int fd, const char *buf, size_t size)
             ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
         }
+
         FD->current_block = block;
         target_file->block_list = block;
         target_file->last_block = block;
+    }
+
+    if (FD->file_pos > target_file->file_offset) {
+        // Finding current block after file resize
+        FD->file_pos = target_file->file_offset;
+        block_offset = FD->file_pos % BLOCK_SIZE;
+        block = target_file->block_list;
+        size_t offset = 0;
+
+        while (offset + BLOCK_SIZE < FD->file_pos) {
+            block = block->next;
+            offset += BLOCK_SIZE;
+        }
+
+        FD->current_block = block;
+    }
+
+    // The necessary check is for the case when the block was previously written
+    // with data of length 2^n. (last block is still the same)
+    if (FD->file_pos != 0 && block_offset == 0) {
+        block_offset = BLOCK_SIZE;
     }
 
     while (written < size) {
         size_t copy_size = (BLOCK_SIZE - block_offset > remaining) ?
             remaining : BLOCK_SIZE - block_offset;
 
-        if (FD->file_pos == MAX_FILE_SIZE && remaining > 0) {
+        if ((FD->file_pos + copy_size) > MAX_FILE_SIZE) {
             ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
         }
@@ -289,7 +311,7 @@ ufs_write(int fd, const char *buf, size_t size)
         }
 
         // If block is full, choose next block
-        if (block_offset == BLOCK_SIZE) {
+        if (block_offset == BLOCK_SIZE && remaining > 0) {
             struct block *next_block = block->next;
             if (next_block == NULL) {
                 next_block = create_block(block, NULL);
@@ -341,19 +363,39 @@ ufs_read(int fd, char *buf, size_t size)
         return 0;
     }
 
-    struct block *block = FD->current_block;
-    if (block == NULL) {
+    if (FD->current_block == NULL) {
         FD->current_block = target_file->block_list;
-        block = FD->current_block;
+    }
+
+    struct block *block = FD->current_block;
+
+    if (FD->file_pos > target_file->file_offset) {
+        // Finding current block after file resize
+        FD->file_pos = target_file->file_offset;
+        block = target_file->block_list;
+        size_t offset = 0;
+
+        while (offset + BLOCK_SIZE < FD->file_pos) {
+            block = block->next;
+            offset += BLOCK_SIZE;
+        }
+
+        FD->current_block = block;
     }
 
     size_t read = 0;
     size_t buf_pos = 0;
     size_t block_offset = FD->file_pos % BLOCK_SIZE;
     size_t remaining = target_file->file_offset - FD->file_pos;
+
     if (remaining > size) {
         remaining = size;
     }
+
+    // WHY it should be removed
+    // if (FD->file_pos != 0 && block_offset == 0) {
+    //     block_offset = BLOCK_SIZE;
+    // }
 
     while (remaining > 0 && block != NULL) {
         size_t can_read_from_block = block->occupied - block_offset;
@@ -480,11 +522,97 @@ ufs_delete(const char *filename)
 int
 ufs_resize(int fd, size_t new_size)
 {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)fd;
-    (void)new_size;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    if (fd < 0 || fd >= file_descriptor_capacity) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    struct filedesc *FD = file_descriptors[fd];
+    if (FD == NULL) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    if (FD->flags & UFS_WRITE_ONLY || FD->flags & UFS_READ_WRITE) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return -1;
+    }
+
+    if (new_size > MAX_FILE_SIZE) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return -1;
+    }
+
+    struct file *target_file = FD->file;
+    if (target_file == NULL) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    if (target_file->block_list == NULL) {
+        return 0;
+    }
+
+    struct block *block = target_file->last_block;
+
+    if (new_size < target_file->file_offset) {
+        size_t remaining = target_file->file_offset - new_size;
+
+        while (remaining > 0 && block != NULL) {
+            size_t deletion_size = (remaining < block->occupied) ?
+                remaining : block->occupied;
+
+            remaining -= deletion_size;
+            block->occupied -= deletion_size;
+            target_file->file_offset -= deletion_size;
+
+            if (block->occupied == 0) {
+                struct block *prev_block = block->prev;
+                free(block->memory);
+                free(block);
+                block = prev_block;
+
+                if (block != NULL) {
+                    block->next = NULL;
+                }
+            }
+        }
+
+        target_file->last_block = block;
+        // Case when new_size == 0
+        if (block == NULL) {
+            target_file->block_list = NULL;
+        }
+    } else {
+        size_t remaining = new_size - target_file->file_offset;
+
+        while (remaining > 0) {
+            size_t can_resize_within_block = BLOCK_SIZE - block->occupied;
+            size_t update_size = (remaining < can_resize_within_block) ?
+                remaining : can_resize_within_block;
+
+            remaining -= update_size;
+            target_file->file_offset += update_size;
+
+            if (target_file->file_offset % BLOCK_SIZE == 0 && remaining > 0) {
+                struct block *next_block = block->next;
+                if (next_block == NULL) {
+                    next_block = create_block(block, NULL);
+                    if (next_block == NULL) {
+                        ufs_error_code = UFS_ERR_NO_MEM;
+                        return -1;
+                    }
+                }
+
+                block = next_block;
+                target_file->last_block = block;
+            }
+        }
+    }
+
+    return 0;
 }
 
 #endif
@@ -492,4 +620,16 @@ ufs_resize(int fd, size_t new_size)
 void
 ufs_destroy(void)
 {
+    for (int i = 0; i < file_descriptor_count; ++i) {
+        ufs_close(i);
+        free(file_descriptors[i]);
+    }
+    free(file_descriptors);
+
+    struct file *file = file_list;
+    while (file != NULL) {
+        struct file *next_file = file->next;
+        ufs_delete(file->name);
+        file = next_file;
+    }
 }
